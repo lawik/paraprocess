@@ -3,18 +3,32 @@ import zmq
 import threading
 import pickle
 import logging
+import time
 
 log = logging.getLogger(__name__)
 
 class Processor(object):
-    def __init__(self, items):
+    """Parallell processing class.
+       Takes a list of Work objects to process.
+       Instantiates ZeroMQ context and socket for receiving results.
+
+       Takes an optional timeout in milliseconds that is applied to each wait inside the processing."""
+    def __init__(self, items, timeout=None):
         self.socket_name = str(uuid.uuid1())
         self.items = items
+        self.timeout = timeout
         self.context = zmq.Context.instance()
         self.socket = self.context.socket(zmq.ROUTER)
         self.socket.bind('inproc://%s' % self.socket_name)
+        self.started = False
+        self.finished = False
 
     def start(self):
+        if self.started and not self.finished:
+            raise ProcessingStartError
+        else:
+            self.finished = False
+        self.started = True
         log.info("Starting parallel processing for %d items of work." % len(self.items))
         for work in self.items:
             thread_args = [
@@ -30,19 +44,28 @@ class Processor(object):
             )
             worker.start()
 
-    def wait_for_response(self):
-        frames = self.socket.recv_multipart()
-        log.info("Received work thread response.")
-        result = Result.unserialize(frames[2])
-        return result
+    def wait_for_result(self):
+        events = self.socket.poll(timeout=self.timeout)
+        if events:
+            frames = self.socket.recv_multipart()
+            log.info("Received work thread response.")
+            result = Result.unserialize(frames[2])
+            return result
+        else:
+            raise ProcessingTimeout("Timeout when waiting for next result.")
 
     def wait_for_all(self):
+        timer_start = time.time()
         results = []
         log.info("Waiting for all results.")
         while len(results) < len(self.items):
-            result = self.wait_for_response()
-            results.append(result)
+            if time.time() - timer_start < self.timeout:
+                result = self.wait_for_result()
+                results.append(result)
+            else:
+                raise ProcessingTimeout("Timeout when waiting for all results.")
         log.info("Received all results.")
+        self.finished = True
         return results
 
     def close(self):
@@ -51,6 +74,11 @@ class Processor(object):
 
 
 class Work(object):
+    """A piece o work for processing.
+    key should be a locally unique string.
+    work_function should be a function to call.
+    further args and kwargs will be passed unmodified to the worker thread.
+    Keep thread-safety in mind."""
     def __init__(self, key, work_function, *args, **kwargs):
         self.key = key
         self.work_function = work_function
@@ -95,12 +123,19 @@ class Result(object):
         return unicode(str(self))
 
 
+class ProcessingStartError(Exception):
+    pass
+
+
+class ProcessingTimeout(Exception):
+    pass
+
 def _work_wrapper(context, socket_name, key, work_function, *args, **kwargs):
     result = Result(key)
     try:
         value = work_function(*args, **kwargs)
         result.set_value(value)
-        log.info("Normal result i worker thread.")
+        log.info("Normal result in worker thread.")
     except Exception as e:
         result.set_exception(e)
         log.exception("Caught exception result in worker thread. Returning exception result!")
@@ -129,23 +164,36 @@ def _sample_work(seconds):
     return "Done %d seconds." % seconds
 
 if __name__ == '__main__':
+    import sys
+    log.addHandler(logging.StreamHandler(sys.stdout))
+    log.setLevel(logging.INFO)
+
+    processor = Processor([
+        Work('0', _sample_work_0),
+        Work('1', _sample_work_1),
+        Work('3', _sample_work_3),
+        Work('5', _sample_work, 5)
+    ], timeout=500)
+
+    processor.start()
+    try:
+        results = processor.wait_for_all()
+    except Exception as e:
+        log.exception("Caught exception in wait_for_all.")
+
     processor = Processor([
         Work('0', _sample_work_0),
         Work('1', _sample_work_1),
         Work('3', _sample_work_3),
         Work('5', _sample_work, 5)
     ])
-
+    log.info("Starting up new work.")
     processor.start()
 
-    results = processor.wait_for_all()
-
-    processor.start()
-
-    first_result = processor.wait_for_response()
+    first_result = processor.wait_for_result()
 
     log.info("First result was: %s" % str(first_result))
 
-    second_result = processor.wait_for_response()
+    second_result = processor.wait_for_result()
 
     log.info("Second result was: %s" % str(second_result))
