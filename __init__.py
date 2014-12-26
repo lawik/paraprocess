@@ -4,6 +4,7 @@ import threading
 import pickle
 import logging
 import time
+import timeit
 
 log = logging.getLogger(__name__)
 
@@ -42,28 +43,35 @@ class Processor(object):
                 args = thread_args,
                 kwargs = work.kwargs
             )
+            worker.daemon = True
             worker.start()
 
     def wait_for_result(self):
-        events = self.socket.poll(timeout=self.timeout)
-        if events:
-            frames = self.socket.recv_multipart()
-            log.info("Received work thread response.")
-            result = Result.unserialize(frames[2])
-            return result
-        else:
-            raise ProcessingTimeout("Timeout when waiting for next result.")
+        try:
+            events = self.socket.poll(timeout=self.timeout)
+            if events:
+                frames = self.socket.recv_multipart()
+                log.info("Received work thread response.")
+                result = Result.unserialize(frames[2])
+                return result
+            else:
+                raise ProcessingTimeout("Timeout when waiting for next result.")
+        except:
+            self.close()
+            log.exception("Caught exception in processing run:")
+            raise
 
     def wait_for_all(self):
         timer_start = time.time()
         results = []
         log.info("Waiting for all results.")
         while len(results) < len(self.items):
-            if time.time() - timer_start < self.timeout:
+            if self.timeout is None or time.time() - timer_start < self.timeout:
                 result = self.wait_for_result()
                 results.append(result)
             else:
                 raise ProcessingTimeout("Timeout when waiting for all results.")
+
         log.info("Received all results.")
         self.finished = True
         return results
@@ -140,10 +148,15 @@ def _work_wrapper(context, socket_name, key, work_function, *args, **kwargs):
         result.set_exception(e)
         log.exception("Caught exception result in worker thread. Returning exception result!")
 
-    socket = context.socket(zmq.REQ)
-    socket.connect('inproc://%s' % socket_name)
-    socket.send(result.serialize())
-    socket.close()
+    try:
+        socket = context.socket(zmq.REQ)
+        socket.connect('inproc://%s' % socket_name)
+        socket.send(result.serialize())
+        socket.close()
+    except:
+        log.exception("Caught exception result when sending result:")
+        pass
+
 
 def _sample_work_0():
     return "Done 0 seconds."
@@ -168,6 +181,9 @@ if __name__ == '__main__':
     log.addHandler(logging.StreamHandler(sys.stdout))
     log.setLevel(logging.INFO)
 
+    log.info("Starting...")
+    start_time = timeit.default_timer()
+
     processor = Processor([
         Work('0', _sample_work_0),
         Work('1', _sample_work_1),
@@ -181,19 +197,22 @@ if __name__ == '__main__':
     except Exception as e:
         log.exception("Caught exception in wait_for_all.")
 
-    processor = Processor([
-        Work('0', _sample_work_0),
-        Work('1', _sample_work_1),
-        Work('3', _sample_work_3),
-        Work('5', _sample_work, 5)
-    ])
-    log.info("Starting up new work.")
-    processor.start()
+    # processor = Processor([
+    #     Work('0', _sample_work_0),
+    #     Work('1', _sample_work_1),
+    #     Work('3', _sample_work_3),
+    #     Work('5', _sample_work, 5)
+    # ])
+    # log.info("Starting up new work.")
+    # processor.start()
 
-    first_result = processor.wait_for_result()
+    # first_result = processor.wait_for_result()
 
-    log.info("First result was: %s" % str(first_result))
+    # log.info("First result was: %s" % str(first_result))
 
-    second_result = processor.wait_for_result()
+    # second_result = processor.wait_for_result()
 
-    log.info("Second result was: %s" % str(second_result))
+    # log.info("Second result was: %s" % str(second_result))
+
+    end_time = timeit.default_timer()
+    log.info("Took %s seconds." % str(end_time - start_time))
