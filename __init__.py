@@ -23,6 +23,7 @@ class Processor(object):
         self.socket.bind('inproc://%s' % self.socket_name)
         self.started = False
         self.finished = False
+        self.results = {}
 
     def start(self):
         if self.started and not self.finished:
@@ -31,6 +32,8 @@ class Processor(object):
             self.finished = False
         self.started = True
         log.info("Starting parallel processing for %d items of work." % len(self.items))
+
+        # @TODO: Ensure unique work.key values, otherwise results will be funny.
         for work in self.items:
             thread_args = [
                 self.context,
@@ -53,6 +56,9 @@ class Processor(object):
                 frames = self.socket.recv_multipart()
                 log.info("Received work thread response.")
                 result = Result.unserialize(frames[2])
+                self.results[result.key] = result
+                if len(self.results) == len(self.items):
+                    self.finished = True
                 return result
             else:
                 raise ProcessingTimeout("Timeout when waiting for next result.")
@@ -63,6 +69,7 @@ class Processor(object):
 
     def wait_for_all(self):
         timer_start = time.time()
+        # @TODO: maybe replace with self.results?
         results = []
         log.info("Waiting for all results.")
         while len(results) < len(self.items):
@@ -73,8 +80,10 @@ class Processor(object):
                 raise ProcessingTimeout("Timeout when waiting for all results.")
 
         log.info("Received all results.")
-        self.finished = True
         return results
+
+    def get_result(self, key):
+        return self.results[key]
 
     def close(self):
         self.socket.close()
