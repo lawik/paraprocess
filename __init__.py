@@ -1,5 +1,4 @@
 import uuid
-import zmq
 import threading
 import pickle
 import logging
@@ -7,6 +6,17 @@ import time
 import timeit
 
 log = logging.getLogger(__name__)
+
+try:
+    from gevent.monkey import saved
+    if saved:
+        log.info("Using gevent-compatible ZeroMQ...")
+        import zmq.green as zmq
+    else:
+        import zmq
+except ImportError:
+    import zmq
+
 
 class Processor(object):
     """Parallell processing class.
@@ -35,6 +45,7 @@ class Processor(object):
 
         # @TODO: Ensure unique work.key values, otherwise results will be funny.
         for work in self.items:
+            log.info("Starting work thread...")
             thread_args = [
                 self.context,
                 self.socket_name,
@@ -43,9 +54,8 @@ class Processor(object):
             ]
             thread_args.extend(work.args)
             worker = threading.Thread(target=_work_wrapper,
-                args = thread_args,
-                kwargs = work.kwargs
-            )
+                                      args=thread_args,
+                                      kwargs=work.kwargs)
             worker.daemon = True
             worker.start()
 
@@ -70,24 +80,26 @@ class Processor(object):
     def wait_for_all(self):
         timer_start = time.time()
         # @TODO: maybe replace with self.results?
-        results = []
         log.info("Waiting for all results.")
-        while len(results) < len(self.items):
+        while not self.finished:
             if self.timeout is None or time.time() - timer_start < self.timeout:
-                result = self.wait_for_result()
-                results.append(result)
+                self.wait_for_result()
             else:
                 raise ProcessingTimeout("Timeout when waiting for all results.")
 
         log.info("Received all results.")
-        return results
+        self.close()
+        return self.results
 
     def get_result(self, key):
         return self.results[key]
 
     def close(self):
-        self.socket.close()
-        self.context.term()
+        try:
+            self.socket.close()
+            self.context.term()
+        except:
+            pass  # Probably fine
 
 
 class Work(object):
@@ -148,6 +160,7 @@ class ProcessingTimeout(Exception):
     pass
 
 def _work_wrapper(context, socket_name, key, work_function, *args, **kwargs):
+    log.info("Started work...")
     result = Result(key)
     try:
         value = work_function(*args, **kwargs)
@@ -163,7 +176,7 @@ def _work_wrapper(context, socket_name, key, work_function, *args, **kwargs):
         socket.send(result.serialize())
         socket.close()
     except:
-        log.exception("Caught exception result when sending result:")
+        log.exception("Caught exception result when sending result for %s:" % key)
         pass
 
 
